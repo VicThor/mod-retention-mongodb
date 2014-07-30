@@ -65,8 +65,11 @@ def get_instance(plugin):
         raise Exception('Cannot find the module python-pymongo. Please install both.')
     uri = plugin.uri
     database = plugin.database
+    username = getattr(plugin, 'username', '')
+    password = getattr(plugin, 'password', '')	
     replica_set = getattr(plugin, 'replica_set', '')
-    instance = Mongodb_retention_scheduler(plugin, uri, database, replica_set)
+	
+    instance = Mongodb_retention_scheduler(plugin, uri, database, username, password, replica_set)
     return instance
 
 
@@ -78,41 +81,57 @@ def chunks(l, n):
 
 
 class Mongodb_retention_scheduler(BaseModule):
-    def __init__(self, modconf, uri, database, replica_set):
+    def __init__(self, modconf, uri, database, username, password, replica_set):
         BaseModule.__init__(self, modconf)
         self.uri = uri
         self.database = database
+        self.username = username
+        self.password = password
         self.replica_set = replica_set
+		
         self.max_workers = 4
+		
         if self.replica_set and not ReplicaSetConnection:
             logger.error('[MongodbRetention] Can not initialize module with '
                          'replica_set because your pymongo lib is too old. '
                          'Please install it with a 2.x+ version from '
                          'https://github.com/mongodb/mongo-python-driver/downloads')
             return None
-
+        
+        # Some used variable init
+        self.con = None
+        self.db = None		
 
 
     def init(self):
         """
         Called by Scheduler to say 'let's prepare yourself guy'
         """
-        logger.debug("Initialization of the mongodb  module")
-
-        if self.replica_set:
-            self.con = ReplicaSetConnection(self.uri, replicaSet=self.replica_set, fsync=False)
-        else:
-            # Old versions of pymongo do not known about fsync
-            if ReplicaSetConnection:
-                self.con = Connection(self.uri, fsync=False)
+        logger.debug("[MongodbRetention]Initialization of the retention-mongodb  module")
+        logger.info("[MongodbRetention]: Try to open a Mongodb connection to %s:%s" % (self.uri, self.database))
+        try:
+            # BEGIN - Connection part
+            if self.replica_set:
+                self.con = ReplicaSetConnection(self.uri, replicaSet=self.replica_set, fsync=False)
             else:
-                self.con = Connection(self.uri)
+                # Old versions of pymongo do not known about fsync
+                if ReplicaSetConnection:
+                    self.con = Connection(self.uri, fsync=False)
+                else:
+                    self.con = Connection(self.uri)
+            # END
+			
+            self.db = getattr(self.con, self.database)
+            if self.username != '' and self.password != '':
+                self.db.authenticate(self.username, self.password)
 
-        #self.con = Connection(self.uri)
-        # Open a gridfs connection
-        self.db = getattr(self.con, self.database)
-        self.hosts_fs = getattr(self.db, 'retention_hosts_raw') #GridFS(self.db, collection='retention_hosts')
-        self.services_fs = getattr(self.db, 'retention_services_raw')
+            self.hosts_fs = getattr(self.db, 'retention_hosts_raw') #GridFS(self.db, collection='retention_hosts')
+            self.services_fs = getattr(self.db, 'retention_services_raw')			
+        except Exception, e:
+            logger.error("[MongodbRetention]: Error %s:" % e)
+            raise
+			
+        logger.info("[MongodbRetention]: Connection OK")
 
 
     def job(self, all_data, wid, offset):
